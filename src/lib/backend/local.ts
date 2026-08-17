@@ -3,7 +3,7 @@
 // the app (and the deployed site) always runs, even before the backend is set
 // up. Behavior matches the original SitIn prototype.
 
-import type { Band, Booking, BookingDisputeReason, BookingStatus, Conversation, CurrentUser, Message, NotificationPreferences, Opening } from "../types";
+import type { Band, Booking, BookingCheckIn, BookingDisputeReason, BookingStatus, Conversation, CurrentUser, Message, NotificationPreferences, Opening } from "../types";
 import { demoCatalogForScene, SEED_CONVERSATIONS } from "../data";
 import { upsertMessage } from "../conversations";
 import { normalizePersistedData } from "../sceneScope";
@@ -226,6 +226,61 @@ export const localBackend: Backend = {
       ...d,
       bookings: d.bookings.map((b) => (b.id === bookingId ? { ...b, status } : b)),
     }));
+  },
+  async submitBookingCheckIn(_user, bookingId, checkInId, file) {
+    if (!file.type.startsWith("video/")) {
+      throw new Error("Check-in recordings must be video files.");
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      throw new Error("Check-in recordings must be 50 MB or smaller.");
+    }
+    const recordingUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not read that recording."));
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsDataURL(file);
+    });
+    const current = read().bookings
+      .find((booking) => booking.id === bookingId)
+      ?.checkIns?.find((checkIn) => checkIn.id === checkInId);
+    if (!current) throw new Error("Check-in was not found.");
+    const checkIn: BookingCheckIn = {
+      ...current,
+      status: "submitted",
+      recordingUrl,
+      recordingName: file.name,
+      submittedAt: new Date().toISOString(),
+      reviewNote: undefined,
+      reviewedAt: undefined,
+    };
+    mutate((data) => ({
+      ...data,
+      bookings: data.bookings.map((booking) => booking.id === bookingId ? {
+        ...booking,
+        checkIns: (booking.checkIns ?? []).map((item) => item.id === checkInId ? checkIn : item),
+      } : booking),
+    }));
+    return checkIn;
+  },
+  async reviewBookingCheckIn(_user, bookingId, checkInId, status, note) {
+    const current = read().bookings
+      .find((booking) => booking.id === bookingId)
+      ?.checkIns?.find((checkIn) => checkIn.id === checkInId);
+    if (!current) throw new Error("Check-in was not found.");
+    const checkIn: BookingCheckIn = {
+      ...current,
+      status,
+      reviewNote: note?.trim() || undefined,
+      reviewedAt: new Date().toISOString(),
+    };
+    mutate((data) => ({
+      ...data,
+      bookings: data.bookings.map((booking) => booking.id === bookingId ? {
+        ...booking,
+        checkIns: (booking.checkIns ?? []).map((item) => item.id === checkInId ? checkIn : item),
+      } : booking),
+    }));
+    return checkIn;
   },
   async markNotificationRead(_user: AuthUser, notificationId: string) {
     mutate((d) => ({
