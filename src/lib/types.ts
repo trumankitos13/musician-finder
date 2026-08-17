@@ -263,6 +263,27 @@ export type BookingStatus =
 
 export type BookingDisputeReason = "no_show" | "quality" | "other";
 
+export type BookingCheckInStatus =
+  | "requested"
+  | "submitted"
+  | "approved"
+  | "changes_requested";
+
+/** A pre-show playing check requested by the booker as part of an offer. */
+export interface BookingCheckIn {
+  id: string;
+  /** Exact deadline; always before the booking's showtime. */
+  dueAt: string;
+  /** Sections, songs, or skills the player should demonstrate. */
+  request: string;
+  status: BookingCheckInStatus;
+  recordingUrl?: string;
+  recordingName?: string;
+  submittedAt?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+}
+
 export interface Booking {
   id: string;
   playerId: string;
@@ -278,6 +299,8 @@ export interface Booking {
   direction?: "outgoing" | "incoming";
   /** when the booking fills a posted Opening, holding it locks that seat */
   openingId?: string;
+  /** Optional pre-show progress confirmations requested with the offer. */
+  checkIns?: BookingCheckIn[];
 }
 
 export interface Message {

@@ -7,7 +7,7 @@ import { VENUES } from "../../lib/data";
 import { useApp } from "../../lib/store";
 import { isSelectableGigDate, scheduleOpening, todayIso, tomorrowIso } from "../../lib/scheduling";
 import { Button, Chip, Modal } from "../ui";
-import { DollarIcon, LockIcon } from "../icons";
+import { CalendarIcon, CloseIcon, DollarIcon, LockIcon, PlusIcon } from "../icons";
 import { Field, inputCls } from "./form";
 
 /** how you'd refer to this player in a "our X can't make it" text */
@@ -47,6 +47,29 @@ function scheduleInputs(gigAt?: string): { date: string; time: string } {
   };
 }
 
+interface CheckInDraft {
+  id: string;
+  date: string;
+  time: string;
+  request: string;
+}
+
+function defaultCheckIns(gigAt: string): CheckInDraft[] {
+  const show = new Date(gigAt).getTime();
+  return [
+    {
+      id: crypto.randomUUID(),
+      ...scheduleInputs(new Date(show - 5 * 24 * 60 * 60 * 1000).toISOString()),
+      request: "Record the sections of the set that need the most preparation.",
+    },
+    {
+      id: crypto.randomUUID(),
+      ...scheduleInputs(new Date(show - 2 * 24 * 60 * 60 * 1000).toISOString()),
+      request: "Play the requested sections cleanly in one continuous take.",
+    },
+  ];
+}
+
 export function BookingSheet({
   open,
   onClose,
@@ -82,6 +105,8 @@ export function BookingSheet({
       ? `Hey! Putting together ${project.name} — want the ${ROLE_NOUN[opening?.instrument ?? primary]} seat?`
       : `Hey! Our ${ROLE_NOUN[primary]} can't make it — can you cover?`,
   );
+  const [checkInsEnabled, setCheckInsEnabled] = useState(false);
+  const [checkIns, setCheckIns] = useState<CheckInDraft[]>([]);
 
   let scheduled: ReturnType<typeof scheduleOpening> | null = null;
   try {
@@ -90,13 +115,35 @@ export function BookingSheet({
     scheduled = null;
   }
   const parsedAmount = Number(amount);
+  const parsedCheckIns = checkIns.map((checkIn) => {
+    try {
+      return {
+        dueAt: scheduleOpening(checkIn.date, checkIn.time).gigAt,
+        request: checkIn.request.trim(),
+      };
+    } catch {
+      return null;
+    }
+  });
+  const showTime = scheduled ? new Date(scheduled.gigAt).getTime() : Number.NaN;
+  const validCheckIns = !checkInsEnabled || (
+    checkIns.length > 0
+    && checkIns.length <= 6
+    && parsedCheckIns.every((checkIn) => checkIn !== null
+      && checkIn.request.length > 0
+      && checkIn.request.length <= 1000
+      && new Date(checkIn.dueAt).getTime() > Date.now()
+      && new Date(checkIn.dueAt).getTime() < showTime)
+    && new Set(parsedCheckIns.map((checkIn) => checkIn?.dueAt)).size === checkIns.length
+  );
   const valid =
     gigTitle.trim().length > 0 &&
     scheduled !== null &&
     isSelectableGigDate(date, todayIso()) &&
     Number.isFinite(parsedAmount) &&
     parsedAmount > 0 &&
-    parsedAmount <= 100000;
+    parsedAmount <= 100000 &&
+    validCheckIns;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -112,6 +159,9 @@ export function BookingSheet({
       amount: Math.round(parsedAmount),
       note: note.trim() || undefined,
       openingId,
+      checkIns: checkInsEnabled
+        ? parsedCheckIns.flatMap((checkIn) => checkIn ? [checkIn] : [])
+        : undefined,
     });
     onClose();
   };
@@ -207,6 +257,112 @@ export function BookingSheet({
             maxLength={4000}
           />
         </Field>
+
+        <section className="rounded-2xl border border-hairline-subtle bg-surface-800/55 p-3.5">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-1 size-4 accent-amber-400"
+              checked={checkInsEnabled}
+              onChange={(event) => {
+                const enabled = event.currentTarget.checked;
+                setCheckInsEnabled(enabled);
+                if (enabled && checkIns.length === 0 && scheduled) {
+                  setCheckIns(defaultCheckIns(scheduled.gigAt));
+                }
+              }}
+            />
+            <span>
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-text-hi">
+                <CalendarIcon size={14} className="text-amber-300" /> Require progress check-ins
+              </span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-text-lo">
+                Set deadlines and the sections {first} should record before the show.
+              </span>
+            </span>
+          </label>
+
+          {checkInsEnabled && (
+            <div className="mt-3 space-y-3 border-t border-hairline-subtle pt-3">
+              {checkIns.map((checkIn, index) => (
+                <div key={checkIn.id} className="rounded-xl border border-amber-500/15 bg-ink-near p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="mono text-[10px] font-bold text-amber-300">
+                      Check-in {index + 1}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove check-in ${index + 1}`}
+                      className="rounded-lg p-1 text-text-lo hover:bg-surface-700 hover:text-text-hi"
+                      onClick={() => setCheckIns((current) => current.filter((item) => item.id !== checkIn.id))}
+                    >
+                      <CloseIcon size={14} />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      aria-label={`Check-in ${index + 1} date`}
+                      type="date"
+                      min={todayIso()}
+                      max={date}
+                      className={inputCls}
+                      value={checkIn.date}
+                      onChange={(event) => setCheckIns((current) => current.map((item) =>
+                        item.id === checkIn.id ? { ...item, date: event.currentTarget.value } : item,
+                      ))}
+                    />
+                    <input
+                      aria-label={`Check-in ${index + 1} time`}
+                      type="time"
+                      className={inputCls}
+                      value={checkIn.time}
+                      onChange={(event) => setCheckIns((current) => current.map((item) =>
+                        item.id === checkIn.id ? { ...item, time: event.currentTarget.value } : item,
+                      ))}
+                    />
+                  </div>
+                  <textarea
+                    aria-label={`Check-in ${index + 1} request`}
+                    rows={2}
+                    className={`${inputCls} mt-2 resize-y`}
+                    maxLength={1000}
+                    value={checkIn.request}
+                    placeholder="Which songs or sections should they play?"
+                    onChange={(event) => setCheckIns((current) => current.map((item) =>
+                      item.id === checkIn.id ? { ...item, request: event.currentTarget.value } : item,
+                    ))}
+                  />
+                </div>
+              ))}
+              {checkIns.length < 6 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => {
+                    if (!scheduled) return;
+                    const fallback = scheduleInputs(new Date(
+                      Math.max(Date.now() + 60 * 60 * 1000, new Date(scheduled.gigAt).getTime() - 24 * 60 * 60 * 1000),
+                    ).toISOString());
+                    setCheckIns((current) => [...current, {
+                      id: crypto.randomUUID(),
+                      ...fallback,
+                      request: "",
+                    }]);
+                  }}
+                >
+                  <PlusIcon size={14} /> Add check-in
+                </Button>
+              )}
+              {!validCheckIns && (
+                <p className="text-[11px] leading-relaxed text-amber-300" role="alert">
+                  Every check-in needs a unique future deadline before showtime and a recording request.
+                </p>
+              )}
+            </div>
+          )}
+        </section>
 
         <Button type="submit" size="lg" disabled={!valid} className="w-full">
           <DollarIcon size={17} /> Send offer

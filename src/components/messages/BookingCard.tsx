@@ -2,13 +2,198 @@
 // Status renders live from the store. Cloud payment states come only from
 // verified Stripe/server paths; demo mode retains local hold/release controls.
 
-import { useState, type FormEvent } from "react";
-import type { Booking, BookingDisputeReason, Player } from "../../lib/types";
+import { useState, type ChangeEvent, type FormEvent } from "react";
+import type { Booking, BookingCheckIn, BookingDisputeReason, Player } from "../../lib/types";
 import { useApp } from "../../lib/store";
 import { isCloudBackend } from "../../lib/backend";
 import { Button, Card, Mono, StarInput, Stars } from "../ui";
-import { CalendarIcon, CheckIcon, LockIcon } from "../icons";
+import { CalendarIcon, CheckIcon, ClockIcon, LockIcon, MusicNoteIcon } from "../icons";
 import { Field, inputCls } from "./form";
+
+const ACTIVE_CHECK_IN_BOOKING_STATUSES = new Set<Booking["status"]>(["accepted", "held", "paid"]);
+const CHECK_IN_DEADLINE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function checkInDeadline(dueAt: string): string {
+  return CHECK_IN_DEADLINE_FORMATTER.format(new Date(dueAt));
+}
+
+function CheckInRow({
+  booking,
+  checkIn,
+  incoming,
+}: {
+  booking: Booking;
+  checkIn: BookingCheckIn;
+  incoming: boolean;
+}) {
+  const { api } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reviewNote, setReviewNote] = useState("");
+  const canSubmit = incoming
+    && ACTIVE_CHECK_IN_BOOKING_STATUSES.has(booking.status)
+    && (checkIn.status === "requested" || checkIn.status === "changes_requested");
+  const overdue = (checkIn.status === "requested" || checkIn.status === "changes_requested")
+    && new Date(checkIn.dueAt).getTime() < Date.now();
+
+  async function submitRecording(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.submitBookingCheckIn(booking.id, checkIn.id, file);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Could not submit recording.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function review(status: "approved" | "changes_requested") {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.reviewBookingCheckIn(booking.id, checkIn.id, status, reviewNote);
+      setReviewNote("");
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : "Could not save review.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const statusLabel = checkIn.status === "changes_requested"
+    ? "Another take requested"
+    : checkIn.status === "submitted"
+      ? "Ready for review"
+      : checkIn.status === "approved"
+        ? "Approved"
+        : overdue
+          ? "Overdue"
+          : "Recording due";
+
+  return (
+    <div className="rounded-xl border border-hairline-subtle bg-ink-near p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-text-hi">
+            <ClockIcon size={13} className="shrink-0 text-amber-300" />
+            Due {checkInDeadline(checkIn.dueAt)}
+          </p>
+          <p className="mt-1.5 text-xs leading-relaxed text-text-mid">{checkIn.request}</p>
+        </div>
+        <span className={`mono shrink-0 text-[9px] font-bold ${
+          checkIn.status === "approved"
+            ? "text-cyan-300"
+            : overdue || checkIn.status === "changes_requested"
+              ? "text-amber-300"
+              : "text-text-lo"
+        }`}>
+          {statusLabel}
+        </span>
+      </div>
+
+      {checkIn.reviewNote && (
+        <p className="mt-2 rounded-lg border border-amber-500/15 bg-amber-500/8 px-2.5 py-2 text-[11px] leading-relaxed text-text-mid">
+          <span className="font-semibold text-amber-300">Booker note:</span> {checkIn.reviewNote}
+        </p>
+      )}
+
+      {checkIn.recordingUrl && (
+        <video
+          className="mt-3 aspect-video w-full rounded-lg bg-black object-contain"
+          src={checkIn.recordingUrl}
+          controls
+          preload="metadata"
+        >
+          Your browser cannot play this check-in recording.
+        </video>
+      )}
+
+      {canSubmit && (
+        <label className={`mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
+          busy
+            ? "cursor-wait border-hairline-subtle text-text-lo"
+            : "border-amber-500/35 bg-amber-500/10 text-amber-300 hover:bg-amber-500/15"
+        }`}>
+          <MusicNoteIcon size={15} />
+          {busy ? "Uploading recording…" : checkIn.status === "changes_requested" ? "Record another take" : "Record or choose video"}
+          <input
+            className="sr-only"
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-m4v"
+            capture="user"
+            disabled={busy}
+            onChange={submitRecording}
+          />
+        </label>
+      )}
+
+      {!incoming && checkIn.status === "submitted" && (
+        <div className="mt-3 space-y-2">
+          <textarea
+            aria-label="Check-in review note"
+            className={`${inputCls} min-h-16 resize-y text-xs`}
+            maxLength={1000}
+            value={reviewNote}
+            placeholder="Optional feedback, or explain what to play in another take"
+            onChange={(event) => setReviewNote(event.currentTarget.value)}
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={busy || !reviewNote.trim()}
+              onClick={() => void review("changes_requested")}
+            >
+              Another take
+            </Button>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void review("approved")}>
+              <CheckIcon size={14} /> Approve
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-[var(--color-danger)]" role="alert">{error}</p>}
+      {canSubmit && (
+        <p className="mt-2 text-center text-[10px] text-text-lo">
+          Private to this booking · video up to 50 MB
+        </p>
+      )}
+    </div>
+  );
+}
+
+function BookingCheckIns({ booking, incoming }: { booking: Booking; incoming: boolean }) {
+  const checkIns = booking.checkIns ?? [];
+  if (checkIns.length === 0) return null;
+  const approved = checkIns.filter((checkIn) => checkIn.status === "approved").length;
+  return (
+    <section className="border-t border-amber-500/15 bg-surface-800/35 px-4 py-3.5">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="flex items-center gap-1.5 text-xs font-semibold text-text-hi">
+          <MusicNoteIcon size={14} className="text-amber-300" /> Pre-show check-ins
+        </p>
+        <Mono className="text-[9px] text-text-lo">{approved}/{checkIns.length} approved</Mono>
+      </div>
+      <div className="space-y-2.5">
+        {checkIns.map((checkIn) => (
+          <CheckInRow key={checkIn.id} booking={booking} checkIn={checkIn} incoming={incoming} />
+        ))}
+      </div>
+    </section>
+  );
+}
 
 export function BookingCard({
   booking,
@@ -91,6 +276,8 @@ export function BookingCard({
           <Mono className="text-[9px] text-text-lo">for the night</Mono>
         </div>
       </div>
+
+      <BookingCheckIns booking={booking} incoming={incoming} />
 
       {/* live status strip */}
       {booking.status === "offer" && (

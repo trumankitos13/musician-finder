@@ -8,6 +8,8 @@
 import type {
   Band,
   Booking,
+  BookingCheckIn,
+  BookingCheckInStatus,
   BookingDisputeReason,
   BookingStatus,
   Conversation,
@@ -133,6 +135,21 @@ export interface Backend {
   markRead(user: AuthUser, playerId: string): Promise<void>;
   addBooking(user: AuthUser, booking: Booking): Promise<void>;
   setBookingStatus(user: AuthUser, bookingId: string, status: BookingStatus): Promise<void>;
+  /** Upload the invited player's check-in recording and mark it submitted. */
+  submitBookingCheckIn(
+    user: AuthUser,
+    bookingId: string,
+    checkInId: string,
+    file: File,
+  ): Promise<BookingCheckIn>;
+  /** Approve a submitted check-in or ask the player for another take. */
+  reviewBookingCheckIn(
+    user: AuthUser,
+    bookingId: string,
+    checkInId: string,
+    status: Extract<BookingCheckInStatus, "approved" | "changes_requested">,
+    note?: string,
+  ): Promise<BookingCheckIn>;
   markNotificationRead(user: AuthUser, notificationId: string): Promise<void>;
   markAllNotificationsRead(user: AuthUser): Promise<void>;
   savePushSubscription(

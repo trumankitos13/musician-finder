@@ -229,6 +229,94 @@ async function main() {
   });
   check("A can send B a real booking offer", !realBooking.error);
 
+  // Booking check-ins are part of the offer terms, visible only to the two
+  // participants, and their private recordings have role-specific writes.
+  const checkInBookingId = `bk-check-in-${Date.now()}`;
+  const checkInId = `ci-rls-${Date.now()}`;
+  const checkInGigAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const checkInDueAt = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+  const checkInOffer = await A.client.rpc("create_booking_offer_with_check_ins", {
+    p_id: checkInBookingId,
+    p_musician_user_id: B.id,
+    p_gig_title: "Check-in test gig",
+    p_venue_name: "RLS Room",
+    p_date: "Next week",
+    p_time: "9:00 PM",
+    p_gig_at: checkInGigAt,
+    p_amount: 225,
+    p_opening_id: null,
+    p_check_ins: [{
+      id: checkInId,
+      due_at: checkInDueAt,
+      request: "Play the bridge and final chorus.",
+    }],
+  });
+  check("booker can atomically create an offer with check-ins", !checkInOffer.error);
+
+  const [aCheckInRead, bCheckInRead, cCheckInRead] = await Promise.all([
+    A.client.from("booking_check_ins").select("id,status").eq("id", checkInId),
+    B.client.from("booking_check_ins").select("id,status").eq("id", checkInId),
+    C.client.from("booking_check_ins").select("id,status").eq("id", checkInId),
+  ]);
+  check("both booking participants can read a check-in", aCheckInRead.data?.length === 1 && bCheckInRead.data?.length === 1);
+  check("nonparticipant cannot read a check-in", !cCheckInRead.error && cCheckInRead.data?.length === 0);
+
+  const recordingPath = `${checkInBookingId}/${checkInId}/${B.id}/rls-proof.mp4`;
+  const earlyUpload = await B.client.storage.from("booking-check-ins").upload(
+    recordingPath,
+    new Blob(["video"], { type: "video/mp4" }),
+    { contentType: "video/mp4" },
+  );
+  check("player cannot upload proof before accepting the offer", earlyUpload.error !== null);
+
+  const checkInAccept = await B.client.from("bookings")
+    .update({ status: "accepted" }).eq("id", checkInBookingId);
+  check("player can accept an offer carrying check-ins", !checkInAccept.error);
+
+  const strangerUpload = await C.client.storage.from("booking-check-ins").upload(
+    `${checkInBookingId}/${checkInId}/${C.id}/forged.mp4`,
+    new Blob(["video"], { type: "video/mp4" }),
+    { contentType: "video/mp4" },
+  );
+  check("nonparticipant cannot upload check-in proof", strangerUpload.error !== null);
+
+  const playerUpload = await B.client.storage.from("booking-check-ins").upload(
+    recordingPath,
+    new Blob(["video"], { type: "video/mp4" }),
+    { contentType: "video/mp4" },
+  );
+  check("accepted player can upload private check-in proof", !playerUpload.error);
+
+  const forgedPlayerSubmit = await A.client.from("booking_check_ins").update({
+    status: "submitted",
+    recording_path: recordingPath,
+    recording_name: "rls-proof.mp4",
+  }).eq("id", checkInId);
+  check("booker cannot submit proof on the player's behalf", forgedPlayerSubmit.error !== null);
+
+  const playerSubmit = await B.client.from("booking_check_ins").update({
+    status: "submitted",
+    recording_path: recordingPath,
+    recording_name: "rls-proof.mp4",
+  }).eq("id", checkInId).select("status").single();
+  check("player can submit their uploaded check-in proof", playerSubmit.data?.status === "submitted");
+
+  const forgedReview = await B.client.from("booking_check_ins")
+    .update({ status: "approved" }).eq("id", checkInId);
+  check("player cannot approve their own check-in", forgedReview.error !== null);
+
+  const [bookerRecording, strangerRecording] = await Promise.all([
+    A.client.storage.from("booking-check-ins").createSignedUrl(recordingPath, 60),
+    C.client.storage.from("booking-check-ins").createSignedUrl(recordingPath, 60),
+  ]);
+  check("booker can create a signed URL for participant proof", !bookerRecording.error && Boolean(bookerRecording.data?.signedUrl));
+  check("nonparticipant cannot sign participant proof", strangerRecording.error !== null);
+
+  const bookerReview = await A.client.from("booking_check_ins")
+    .update({ status: "approved", review_note: "Locked in." })
+    .eq("id", checkInId).select("status,reviewed_at").single();
+  check("booker can approve a submitted check-in", bookerReview.data?.status === "approved" && Boolean(bookerReview.data?.reviewed_at));
+
   await A.client.from("bookings").update({ status: "accepted" }).eq("id", realBookingId);
   const afterWrongActor = await admin.from("bookings").select("status").eq("id", realBookingId).single();
   check("booker cannot accept their own offer", afterWrongActor.data?.status === "offer");
@@ -543,6 +631,7 @@ async function main() {
   if (lateCancellationPayment.data?.id) {
     await admin.from("booking_payments").delete().eq("id", lateCancellationPayment.data.id);
   }
+  await admin.storage.from("booking-check-ins").remove([recordingPath]);
   await admin.auth.admin.deleteUser(A.id);
   await admin.auth.admin.deleteUser(B.id);
   await admin.auth.admin.deleteUser(C.id);

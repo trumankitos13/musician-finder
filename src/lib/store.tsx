@@ -21,6 +21,8 @@ import {
 import type {
   Band,
   Booking,
+  BookingCheckIn,
+  BookingCheckInStatus,
   BookingDisputeReason,
   Conversation,
   CurrentUser,
@@ -102,6 +104,7 @@ type Action =
   | { type: "MARK_READ"; conversationId: string }
   | { type: "ADD_BOOKING"; booking: Booking }
   | { type: "SET_BOOKING_STATUS"; bookingId: string; status: Booking["status"] }
+  | { type: "SET_BOOKING_CHECK_IN"; bookingId: string; checkIn: BookingCheckIn }
   | { type: "MARK_NOTIFICATION_READ"; notificationId: string }
   | { type: "MARK_ALL_NOTIFICATIONS_READ" }
   | { type: "UPDATE_NOTIFICATION_PREFERENCES"; patch: Partial<NotificationPreferences> }
@@ -164,6 +167,20 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         bookings: state.bookings.map((b) =>
           b.id === action.bookingId ? { ...b, status: action.status } : b,
+        ),
+      };
+    case "SET_BOOKING_CHECK_IN":
+      return {
+        ...state,
+        bookings: state.bookings.map((booking) =>
+          booking.id === action.bookingId
+            ? {
+                ...booking,
+                checkIns: (booking.checkIns ?? []).map((checkIn) =>
+                  checkIn.id === action.checkIn.id ? action.checkIn : checkIn,
+                ),
+              }
+            : booking,
         ),
       };
     case "MARK_NOTIFICATION_READ":
@@ -251,6 +268,7 @@ interface BookingOfferInput {
   note?: string;
   /** when the offer is for a posted Opening — holding it locks that seat */
   openingId?: string;
+  checkIns?: Array<Pick<BookingCheckIn, "dueAt" | "request">>;
 }
 
 interface CreateProjectInput {
@@ -309,6 +327,15 @@ export interface AppApi {
   respondToBooking(bookingId: string, status: "accepted" | "declined"): void;
   /** withdraw an outgoing offer or cancel an accepted booking */
   cancelBooking(bookingId: string): void;
+  /** Upload the player's proof for one pre-show check-in. */
+  submitBookingCheckIn(bookingId: string, checkInId: string, file: File): Promise<void>;
+  /** Let the booker accept a take or request a replacement. */
+  reviewBookingCheckIn(
+    bookingId: string,
+    checkInId: string,
+    status: Extract<BookingCheckInStatus, "approved" | "changes_requested">,
+    note?: string,
+  ): Promise<void>;
   markNotificationRead(notificationId: string): void;
   markAllNotificationsRead(): void;
   enablePushNotifications(): Promise<void>;
@@ -555,6 +582,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
           amount: input.amount,
           status: "offer",
           openingId: input.openingId,
+          checkIns: input.checkIns?.map((checkIn) => ({
+            id: uid("ci"),
+            dueAt: checkIn.dueAt,
+            request: checkIn.request,
+            status: "requested" as const,
+          })),
         };
         const noteMsg: Message | null = input.note
           ? { id: uid("m"), from: "me", text: input.note, at: nowLabel() }
@@ -606,6 +639,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
       cancelBooking(bookingId) {
         dispatch({ type: "SET_BOOKING_STATUS", bookingId, status: "cancelled" });
         persist((user) => backend.setBookingStatus(user, bookingId, "cancelled"));
+      },
+
+      async submitBookingCheckIn(bookingId, checkInId, file) {
+        const user = authUserRef.current;
+        if (!user) throw new Error("Sign in before submitting a check-in.");
+        const checkIn = await backend.submitBookingCheckIn(user, bookingId, checkInId, file);
+        dispatch({ type: "SET_BOOKING_CHECK_IN", bookingId, checkIn });
+      },
+
+      async reviewBookingCheckIn(bookingId, checkInId, status, note) {
+        const user = authUserRef.current;
+        if (!user) throw new Error("Sign in before reviewing a check-in.");
+        const checkIn = await backend.reviewBookingCheckIn(
+          user,
+          bookingId,
+          checkInId,
+          status,
+          note,
+        );
+        dispatch({ type: "SET_BOOKING_CHECK_IN", bookingId, checkIn });
       },
 
       markNotificationRead(notificationId) {

@@ -6,6 +6,7 @@ const rows: Record<string, unknown> = {
   profiles: { id: "user-1", handle: "player", scene: "nashville" },
   follows: [],
   bookings: [],
+  booking_check_ins: [],
   conversations: [],
   messages: [],
   direct_conversations: [],
@@ -71,6 +72,10 @@ vi.mock("../supabase", () => ({
         getPublicUrl: (path: string) => ({
           data: { publicUrl: `https://example.test/${path}` },
         }),
+        createSignedUrl: (path: string) => Promise.resolve({
+          data: { signedUrl: `https://example.test/private/${path}` },
+          error: null,
+        }),
       }),
     },
   },
@@ -86,6 +91,46 @@ describe("supabaseBackend.load", () => {
       ["nashville-opening", "nashville"],
       ["legacy-opening", "austin"],
     ]);
+  });
+
+  it("attaches private signed check-in recordings to their booking", async () => {
+    const previousBookings = rows.bookings;
+    const previousCheckIns = rows.booking_check_ins;
+    rows.bookings = [{
+      id: "bk-1",
+      user_id: "user-1",
+      musician_id: "player-2",
+      gig_title: "Future show",
+      venue_name: "Room",
+      date: "Saturday",
+      time: "9 PM",
+      amount: 200,
+      status: "accepted",
+    }];
+    rows.booking_check_ins = [{
+      id: "ci-1",
+      booking_id: "bk-1",
+      due_at: "2026-08-08T00:00:00.000Z",
+      request: "Play the bridge.",
+      status: "submitted",
+      recording_path: "bk-1/ci-1/player-2/take.mp4",
+      recording_name: "take.mp4",
+      submitted_at: "2026-08-07T00:00:00.000Z",
+    }];
+
+    try {
+      const data = await supabaseBackend.load({ id: "user-1", email: null });
+      expect(data.bookings[0]?.checkIns?.[0]).toMatchObject({
+        id: "ci-1",
+        request: "Play the bridge.",
+        status: "submitted",
+        recordingName: "take.mp4",
+        recordingUrl: "https://example.test/private/bk-1/ci-1/player-2/take.mp4",
+      });
+    } finally {
+      rows.bookings = previousBookings;
+      rows.booking_check_ins = previousCheckIns;
+    }
   });
 });
 

@@ -13,6 +13,7 @@ import type { Catalog } from "../data";
 import type {
   Booking,
   Band,
+  BookingCheckIn,
   BookingStatus,
   Conversation,
   CurrentUser,
@@ -57,6 +58,32 @@ function fail(context: string, error: { message: string } | null): void {
 function avatarUrl(path: unknown): string | undefined {
   if (typeof path !== "string" || !path) return undefined;
   return supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
+}
+
+function mapBookingCheckIn(
+  row: Record<string, unknown>,
+  recordingUrl?: string,
+): BookingCheckIn {
+  return {
+    id: row.id as string,
+    dueAt: row.due_at as string,
+    request: row.request as string,
+    status: row.status as BookingCheckIn["status"],
+    recordingUrl,
+    recordingName: (row.recording_name as string | null) ?? undefined,
+    submittedAt: (row.submitted_at as string | null) ?? undefined,
+    reviewedAt: (row.reviewed_at as string | null) ?? undefined,
+    reviewNote: (row.review_note as string | null) ?? undefined,
+  };
+}
+
+async function signedCheckInUrl(path: unknown): Promise<string | undefined> {
+  if (typeof path !== "string" || !path) return undefined;
+  const { data, error } = await supabase.storage
+    .from("booking-check-ins")
+    .createSignedUrl(path, 60 * 60);
+  fail("sign check-in recording", error);
+  return data?.signedUrl;
 }
 
 function profileSeed(id: string): number {
@@ -121,6 +148,11 @@ export const supabaseBackend: Backend = {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "bookings" },
+        onChange,
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "booking_check_ins" },
         onChange,
       )
       .on(
@@ -276,6 +308,7 @@ export const supabaseBackend: Backend = {
       availabilityRes,
       followsRes,
       bookingsRes,
+      checkInsRes,
       convosRes,
       messagesRes,
       directConvosRes,
@@ -299,6 +332,7 @@ export const supabaseBackend: Backend = {
           .maybeSingle(),
         supabase.from("follows").select("target_id").eq("user_id", user.id),
         supabase.from("bookings").select("*").order("created_at"),
+        supabase.from("booking_check_ins").select("*").order("due_at"),
         supabase.from("conversations").select("*").eq("user_id", user.id),
         supabase
           .from("messages")
@@ -335,6 +369,7 @@ export const supabaseBackend: Backend = {
     fail("load availability", availabilityRes.error);
     fail("load follows", followsRes.error);
     fail("load bookings", bookingsRes.error);
+    fail("load booking check-ins", checkInsRes.error);
     fail("load conversations", convosRes.error);
     fail("load messages", messagesRes.error);
     fail("load direct conversations", directConvosRes.error);
@@ -437,6 +472,18 @@ export const supabaseBackend: Backend = {
       };
     });
 
+    const checkInsByBooking = new Map<string, BookingCheckIn[]>();
+    const signedCheckIns = await Promise.all(
+      ((checkInsRes.data ?? []) as Record<string, unknown>[]).map(async (row) => ({
+        row,
+        checkIn: mapBookingCheckIn(row, await signedCheckInUrl(row.recording_path)),
+      })),
+    );
+    for (const { row, checkIn } of signedCheckIns) {
+      const bookingId = row.booking_id as string;
+      checkInsByBooking.set(bookingId, [...(checkInsByBooking.get(bookingId) ?? []), checkIn]);
+    }
+
     const bookings: Booking[] = ((bookingsRes.data ?? []) as Record<string, unknown>[]).map((b) => ({
       id: b.id as string,
       playerId: b.user_id === user.id ? b.musician_id as string : b.user_id as string,
@@ -450,6 +497,7 @@ export const supabaseBackend: Backend = {
       status: (b.status === "paid" ? "held" : b.status) as BookingStatus,
       openingId: (b.opening_id as string) ?? undefined,
       direction: b.user_id === user.id ? "outgoing" : "incoming",
+      checkIns: checkInsByBooking.get(b.id as string) ?? [],
     }));
 
     const notifications: NotificationItem[] = (
@@ -760,6 +808,30 @@ export const supabaseBackend: Backend = {
 
   async addBooking(user, booking) {
     const realRecipient = isAccountPlayerId(booking.playerId);
+    const checkIns = booking.checkIns ?? [];
+    if (checkIns.length > 0) {
+      if (!realRecipient || !booking.gigAt) {
+        throw new Error("Check-ins require an account-backed player and scheduled showtime.");
+      }
+      const { error } = await supabase.rpc("create_booking_offer_with_check_ins", {
+        p_id: booking.id,
+        p_musician_user_id: booking.playerId,
+        p_gig_title: booking.gigTitle,
+        p_venue_name: booking.venueName,
+        p_date: booking.date,
+        p_time: booking.time,
+        p_gig_at: booking.gigAt,
+        p_amount: booking.amount,
+        p_opening_id: booking.openingId ?? null,
+        p_check_ins: checkIns.map((checkIn) => ({
+          id: checkIn.id,
+          due_at: checkIn.dueAt,
+          request: checkIn.request,
+        })),
+      });
+      fail("add booking with check-ins", error);
+      return;
+    }
     const { error } = await supabase.from("bookings").insert({
       id: booking.id,
       user_id: user.id,
@@ -783,6 +855,75 @@ export const supabaseBackend: Backend = {
       .update({ status })
       .eq("id", bookingId);
     fail("set booking status", error);
+  },
+
+  async submitBookingCheckIn(user, bookingId, checkInId, file) {
+    if (!file.type.startsWith("video/")) {
+      throw new Error("Check-in recordings must be video files.");
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      throw new Error("Check-in recordings must be 50 MB or smaller.");
+    }
+    const existing = await supabase
+      .from("booking_check_ins")
+      .select("recording_path")
+      .eq("id", checkInId)
+      .eq("booking_id", bookingId)
+      .single();
+    fail("load check-in", existing.error);
+
+    const extension = file.type === "video/quicktime"
+      ? "mov"
+      : file.type === "video/webm"
+        ? "webm"
+        : file.type === "video/x-m4v"
+          ? "m4v"
+          : "mp4";
+    const path = `${bookingId}/${checkInId}/${user.id}/${crypto.randomUUID()}.${extension}`;
+    const uploaded = await supabase.storage.from("booking-check-ins").upload(path, file, {
+      cacheControl: "3600",
+      contentType: file.type,
+      upsert: false,
+    });
+    fail("upload check-in recording", uploaded.error);
+
+    const saved = await supabase
+      .from("booking_check_ins")
+      .update({
+        status: "submitted",
+        recording_path: path,
+        recording_name: file.name.slice(0, 240),
+      })
+      .eq("id", checkInId)
+      .eq("booking_id", bookingId)
+      .select("*")
+      .single();
+    if (saved.error) {
+      await supabase.storage.from("booking-check-ins").remove([path]);
+      fail("submit check-in", saved.error);
+    }
+
+    const oldPath = (existing.data as { recording_path?: string | null } | null)?.recording_path;
+    if (oldPath && oldPath !== path) {
+      await supabase.storage.from("booking-check-ins").remove([oldPath]);
+    }
+    return mapBookingCheckIn(
+      saved.data as Record<string, unknown>,
+      await signedCheckInUrl(path),
+    );
+  },
+
+  async reviewBookingCheckIn(_user, bookingId, checkInId, status, note) {
+    const saved = await supabase
+      .from("booking_check_ins")
+      .update({ status, review_note: note?.trim() || null })
+      .eq("id", checkInId)
+      .eq("booking_id", bookingId)
+      .select("*")
+      .single();
+    fail("review check-in", saved.error);
+    const row = saved.data as Record<string, unknown>;
+    return mapBookingCheckIn(row, await signedCheckInUrl(row.recording_path));
   },
 
   async markNotificationRead(_user, notificationId) {
